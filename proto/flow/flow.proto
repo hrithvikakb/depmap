@@ -1,0 +1,39 @@
+syntax = "proto3";
+package flow;
+
+option go_package = "hubbleclone/pkg/proto/flow";
+
+// Flow represents a network flow between two endpoints
+message Flow {
+  // L3 (IP) information
+  string source_ip = 1;
+  string destination_ip = 2;
+
+  // L4 (TCP/UDP) information
+  uint32 source_port = 3;
+  uint32 destination_port = 4;
+  
+  // Protocol (TCP/UDP)
+  string protocol = 5;
+
+  // Kubernetes metadata
+  string source_pod = 6;
+  string source_namespace = 7;
+  string destination_pod = 8;
+  string destination_namespace = 9;
+
+  // Flow verdict (FORWARDED or DROPPED)
+  string verdict = 10;
+
+  // Timestamp of the flow
+  int64 time = 11;
+}
+
+// FlowService defines the gRPC service for streaming flows
+service FlowService {
+  // GetFlows streams observed flows
+  rpc GetFlows(GetFlowsRequest) returns (stream Flow) {}
+}
+
+// GetFlowsRequest is an empty message as we don't need any parameters for now
+message GetFlowsRequest {} 

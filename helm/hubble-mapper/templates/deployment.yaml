@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "depmap.fullname" . }}-relay
+  labels:
+    {{- include "depmap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "depmap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: relay
+  template:
+    metadata:
+      labels:
+        {{- include "depmap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: relay
+    spec:
+      serviceAccountName: {{ include "depmap.serviceAccountName" . }}
+      containers:
+        - name: relay
+          image: "{{ .Values.relay.image.repository }}:{{ .Values.relay.image.tag }}"
+          imagePullPolicy: {{ .Values.relay.image.pullPolicy }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.relay.service.port }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.relay.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }} 

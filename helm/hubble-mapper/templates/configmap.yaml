@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hubble-cni-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hubble-mapper.labels" . | nindent 4 }}
+data:
+  10-hubble.conf: |
+    {
+      "cniVersion": "0.4.0",
+      "name": "hubble-net",
+      "type": "hubble-cni",
+      "bridge": "{{ .Values.cni.bridge }}",
+      "isDefaultGateway": true,
+      "ipam": {
+        "type": "host-local",
+        "subnet": "{{ .Values.cni.subnet }}"
+      }
+    } 
