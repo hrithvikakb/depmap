@@ -1,86 +1,110 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"context"
-	pb "hubbleclone/pkg/proto/flow"
+	pb "hubbleclone/proto/flow"
 
-	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
-var rootCmd = &cobra.Command{
-	Use:   "depmap",
-	Short: "A lightweight service dependency mapper for Kubernetes",
-}
-
-var startCmd = &cobra.Command{
-	Use:   "start",
-	Short: "Start the depmap agent and server",
-	Run: func(cmd *cobra.Command, args []string) {
-		// TODO: Implement start logic
-		fmt.Println("Starting depmap agent and server...")
-	},
-}
-
-var observeCmd = &cobra.Command{
-	Use:   "observe",
-	Short: "Observe live service dependencies",
-	Run: func(cmd *cobra.Command, args []string) {
-		format, _ := cmd.Flags().GetString("format")
-		if format != "json" {
-			log.Fatal("Only JSON format is supported")
-		}
-
-		conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
-		if err != nil {
-			log.Fatalf("Failed to connect: %v", err)
-		}
-		defer conn.Close()
-
-		client := pb.NewFlowServiceClient(conn)
-		stream, err := client.GetFlows(context.Background(), &pb.GetFlowsRequest{})
-		if err != nil {
-			log.Fatalf("Failed to get flows: %v", err)
-		}
-
-		for {
-			flow, err := stream.Recv()
-			if err != nil {
-				log.Fatalf("Failed to receive flow: %v", err)
-			}
-
-			// Create a simplified output format
-			output := map[string]string{
-				"source":      fmt.Sprintf("%s (%s)", flow.SourcePod, flow.SourceNamespace),
-				"destination": fmt.Sprintf("%s (%s)", flow.DestinationPod, flow.DestinationNamespace),
-				"protocol":    flow.Protocol,
-			}
-
-			jsonOutput, err := json.Marshal(output)
-			if err != nil {
-				log.Printf("Failed to marshal flow: %v", err)
-				continue
-			}
-
-			fmt.Println(string(jsonOutput))
-		}
-	},
-}
-
-func init() {
-	observeCmd.Flags().String("format", "json", "Output format (only json supported)")
-	rootCmd.AddCommand(startCmd)
-	rootCmd.AddCommand(observeCmd)
-}
+var (
+	serverAddr = flag.String("server", "localhost:4245", "The server address in the format of host:port")
+	namespace  = flag.String("namespace", "", "Filter flows by namespace")
+	verdict    = flag.String("verdict", "", "Filter flows by verdict (FORWARDED or DROPPED)")
+	format     = flag.String("format", "json", "Output format (json or text)")
+)
 
 func main() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+	flag.Parse()
+
+	// Set up connection to server
+	conn, err := grpc.Dial(*serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("Failed to connect: %v", err)
 	}
+	defer conn.Close()
+
+	client := pb.NewFlowServiceClient(conn)
+
+	// Create context that's canceled on SIGTERM/SIGINT
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle shutdown gracefully
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		cancel()
+	}()
+
+	// Start streaming flows
+	stream, err := client.GetFlows(ctx, &pb.GetFlowsRequest{
+		Namespace: *namespace,
+		Verdict:   *verdict,
+	})
+	if err != nil {
+		log.Fatalf("Failed to start flow stream: %v", err)
+	}
+
+	log.Printf("Observing flows...")
+	for {
+		flow, err := stream.Recv()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			log.Fatalf("Failed to receive flow: %v", err)
+		}
+
+		// Format and print the flow
+		switch *format {
+		case "json":
+			printJSON(flow)
+		case "text":
+			printText(flow)
+		default:
+			log.Fatalf("Unknown format: %s", *format)
+		}
+	}
+}
+
+func printJSON(flow *pb.Flow) {
+	jsonBytes, err := json.Marshal(flow)
+	if err != nil {
+		log.Printf("Failed to marshal flow to JSON: %v", err)
+		return
+	}
+	fmt.Println(string(jsonBytes))
+}
+
+func printText(flow *pb.Flow) {
+	// Format: source -> destination [protocol] (verdict)
+	src := flow.SourcePod
+	if src == "" {
+		src = flow.SourceIp
+	}
+	if flow.SourceNamespace != "" {
+		src = fmt.Sprintf("%s (%s)", src, flow.SourceNamespace)
+	}
+
+	dst := flow.DestinationPod
+	if dst == "" {
+		dst = flow.DestinationIp
+	}
+	if flow.DestinationNamespace != "" {
+		dst = fmt.Sprintf("%s (%s)", dst, flow.DestinationNamespace)
+	}
+
+	fmt.Printf("%s -> %s [%s] (%s)\n", src, dst, flow.L4Protocol, flow.Verdict)
 }

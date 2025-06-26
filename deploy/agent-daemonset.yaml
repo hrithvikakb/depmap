@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: depmap-agent
+  namespace: kube-system
+spec:
+  selector:
+    app: depmap-agent
+  ports:
+  - name: grpc
+    port: 4245
+    targetPort: 4245
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: depmap-agent
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: depmap-agent
+  template:
+    metadata:
+      labels:
+        app: depmap-agent
+    spec:
+      serviceAccountName: depmap-agent
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: agent
+        image: depmap:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+          capabilities:
+            add: ["NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE"]
+        volumeMounts:
+        - name: bpf-fs
+          mountPath: /sys/fs/bpf
+        - name: modules
+          mountPath: /lib/modules
+          readOnly: true
+        - name: src
+          mountPath: /usr/src
+          readOnly: true
+        - name: run
+          mountPath: /var/run/netns
+          mountPropagation: Bidirectional
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: DEPMAP_MODE
+          value: "k8s"
+        - name: DEPMAP_AGENT_PORT
+          value: "4245"
+        - name: BPF_OBJECT_PATH
+          value: "/opt/depmap/bpf/flow_observer.o"
+        ports:
+        - name: grpc
+          containerPort: 4245
+          hostPort: 4245
+          protocol: TCP
+        resources:
+          limits:
+            memory: 200Mi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+      volumes:
+      - name: bpf-fs
+        hostPath:
+          path: /sys/fs/bpf
+          type: DirectoryOrCreate
+      - name: modules
+        hostPath:
+          path: /lib/modules
+      - name: src
+        hostPath:
+          path: /usr/src
+      - name: run
+        hostPath:
+          path: /var/run/netns
+          type: DirectoryOrCreate 

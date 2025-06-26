@@ -1,54 +1,46 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "depmap.fullname" . }}-agent
+  name: hubble-flow-agent
+  namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "depmap.labels" . | nindent 4 }}
-    app.kubernetes.io/component: agent
+    app: hubble-flow-agent
+    {{- include "hubble-mapper.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      {{- include "depmap.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: agent
+      app: hubble-flow-agent
   template:
     metadata:
       labels:
-        {{- include "depmap.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: agent
+        app: hubble-flow-agent
     spec:
-      serviceAccountName: {{ include "depmap.serviceAccountName" . }}
       hostNetwork: true
-      hostPID: true
       containers:
-        - name: agent
-          image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag }}"
-          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
-          securityContext:
-            privileged: true
-            capabilities:
-              add:
-                - SYS_ADMIN
-                - NET_ADMIN
-          volumeMounts:
-            - name: bpf-fs
-              mountPath: {{ .Values.depmap.bpf.mountPath }}
-            - name: bpf-programs
-              mountPath: /opt/depmap/bpf
-          resources:
-            {{- toYaml .Values.agent.resources | nindent 12 }}
-      volumes:
+      - name: agent
+        image: {{ .Values.image.registry }}/{{ .Values.image.repository }}/hubble-flow-agent:{{ .Values.image.tag }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        securityContext:
+          privileged: true
+        resources:
+          {{- toYaml .Values.agent.resources | nindent 12 }}
+        volumeMounts:
         - name: bpf-fs
-          hostPath:
-            path: {{ .Values.depmap.bpf.mountPath }}
-            type: Directory
-        - name: bpf-programs
-          configMap:
-            name: {{ .Values.depmap.bpf.configMap.name }}
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }} 
+          mountPath: /sys/fs/bpf
+        - name: cni-bin
+          mountPath: /opt/cni/bin
+        - name: cni-conf
+          mountPath: /etc/cni/net.d
+      volumes:
+      - name: bpf-fs
+        hostPath:
+          path: /sys/fs/bpf
+          type: DirectoryOrCreate
+      - name: cni-bin
+        hostPath:
+          path: /opt/cni/bin
+          type: DirectoryOrCreate
+      - name: cni-conf
+        hostPath:
+          path: /etc/cni/net.d
+          type: DirectoryOrCreate 

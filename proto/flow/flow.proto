@@ -13,27 +13,74 @@ message Flow {
   uint32 source_port = 3;
   uint32 destination_port = 4;
   
-  // Protocol (TCP/UDP)
-  string protocol = 5;
+  // Protocol information
+  string l4_protocol = 5;  // TCP/UDP
+  string l7_protocol = 6;  // HTTP/gRPC/etc
 
   // Kubernetes metadata
-  string source_pod = 6;
-  string source_namespace = 7;
-  string destination_pod = 8;
-  string destination_namespace = 9;
+  string source_pod = 7;
+  string source_namespace = 8;
+  string source_workload = 9;      // deployment/statefulset/etc name
+  string source_workload_kind = 10; // Deployment/StatefulSet/etc
+
+  string destination_pod = 11;
+  string destination_namespace = 12;
+  string destination_workload = 13;
+  string destination_workload_kind = 14;
 
   // Flow verdict (FORWARDED or DROPPED)
-  string verdict = 10;
+  string verdict = 15;
 
-  // Timestamp of the flow
-  int64 time = 11;
+  // Timestamp of the flow (Unix timestamp in nanoseconds)
+  int64 time = 16;
+
+  // Optional error message if verdict is DROPPED
+  string drop_reason = 17;
 }
 
 // FlowService defines the gRPC service for streaming flows
 service FlowService {
   // GetFlows streams observed flows
   rpc GetFlows(GetFlowsRequest) returns (stream Flow) {}
+
+  // GetServiceMap returns aggregated service-to-service communication edges
+  rpc GetServiceMap(GetServiceMapRequest) returns (stream ServiceMapEdge) {}
 }
 
-// GetFlowsRequest is an empty message as we don't need any parameters for now
-message GetFlowsRequest {} 
+// GetFlowsRequest allows filtering the flow stream
+message GetFlowsRequest {
+  // Filter flows by namespace
+  string namespace = 1;
+  
+  // Filter flows by verdict (FORWARDED or DROPPED)
+  string verdict = 2;
+}
+
+// GetServiceMapRequest configures service map aggregation
+message GetServiceMapRequest {
+  // Aggregate flows from this namespace
+  string namespace = 1;
+
+  // Time window in seconds to aggregate flows over
+  int32 window_seconds = 2;
+}
+
+// ServiceMapEdge represents an edge in the service dependency graph
+message ServiceMapEdge {
+  // Source service information
+  string source_service = 1;
+  string source_namespace = 2;
+  
+  // Destination service information  
+  string destination_service = 3;
+  string destination_namespace = 4;
+
+  // Protocol used (e.g. HTTP, gRPC)
+  string protocol = 5;
+
+  // Number of successful requests
+  int32 successful_requests = 6;
+
+  // Number of failed requests
+  int32 failed_requests = 7;
+} 

@@ -1,16 +1,5 @@
 apiVersion: v2
-name: depmap
-description: A Kubernetes service dependency mapper using eBPF
-type: application
+name: hubble-mapper
+description: Service Dependency Mapper using eBPF and CNI
 version: 0.1.0
-appVersion: "0.1.0"
-keywords:
-  - kubernetes
-  - networking
-  - ebpf
-  - service-map
-maintainers:
-  - name: depmap-team
-home: https://github.com/yourusername/depmap
-sources:
-  - https://github.com/yourusername/depmap 
+appVersion: "1.0.0" 

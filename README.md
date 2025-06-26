@@ -1,107 +1,80 @@
 # Depmap - Kubernetes Service Dependency Mapper
 
-Depmap is a lightweight service dependency mapping tool for Kubernetes that uses eBPF to track and visualize service-to-service communication in real-time. It's designed as a minimal alternative to Cilium + Hubble, focusing solely on service dependency mapping.
+A lightweight service dependency mapper for Kubernetes that shows live service-to-service communication patterns using eBPF.
 
 ## Features
 
-- Real-time service dependency tracking using eBPF
-- Kubernetes-aware pod mapping
-- Support for TCP and UDP protocols
-- Tracks both successful (FORWARDED) and failed (DROPPED) connections
-- Simple JSON output format for easy integration
-- Cross-platform support (macOS, Windows, Linux)
-
-## Quick Start
-
-### Option 1: Homebrew (macOS)
-
-```bash
-# Install via Homebrew
-brew install depmap
-
-# Install in your cluster
-depmap install
-
-# Start observing traffic
-depmap observe
-```
-
-### Option 2: One-liner Install Script
-
-```bash
-# Download and install depmap
-curl -sSfL https://raw.githubusercontent.com/yourusername/depmap/main/install.sh | bash
-
-# Install in your cluster
-depmap install
-
-# Start observing traffic
-depmap observe
-```
-
-### Option 3: Manual Installation
-
-1. Download the latest release from [GitHub Releases](https://github.com/yourusername/depmap/releases)
-2. Extract and move the binary to your PATH
-3. Run `depmap install` to deploy to your cluster
+- **Live Flow Monitoring**: Captures and streams network flows between pods in real-time
+- **Kubernetes-Aware**: Maps IP addresses to pod names, namespaces, and workload information
+- **Protocol Detection**: Identifies L4 protocols (TCP/UDP) for each flow
+- **Verdict Tracking**: Shows both successful (FORWARDED) and failed (DROPPED) connection attempts
+- **Filtering**: Filter flows by namespace or verdict
+- **Multiple Output Formats**: JSON and human-readable text output
 
 ## Prerequisites
 
-- Kubernetes cluster (tested with kind, k3d, microk8s, EKS, GKE)
-- For GKE: requires Standard cluster with `--network-plugin=none`
-- kubectl configured with cluster access
-- For local development:
-  - Go 1.22+
-  - Clang and LLVM (for eBPF compilation)
-  - Docker for building images
+- Linux kernel 4.18+ (for eBPF support)
+- Go 1.19+
+- LLVM/Clang (for compiling eBPF programs)
+- Protocol Buffers compiler (protoc)
+- Access to a Kubernetes cluster (local or remote)
 
-## Development
+## Installation
 
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/depmap
-cd depmap
+We have three binaries:
+- `depmap-agent`: The eBPF-based flow collector
+- `depmap-server`: The gRPC server that streams flows
+- `depmap`: The CLI client for observing flows
+
+## Usage
+
+1. Start the agent (requires root privileges):
+   ```bash
+   sudo depmap-agent
+   ```
+
+2. In another terminal, start the server:
+   ```bash
+   depmap-server
+   ```
+
+3. In a third terminal, observe flows:
+   ```bash
+   # Watch all flows in JSON format
+   depmap --format json
+
+   # Filter flows by namespace
+   depmap --namespace default
+
+   # Filter by verdict
+   depmap --verdict DROPPED
+
+   # Human-readable output
+   depmap --format text
+   ```
+
+Example output (text format):
 ```
-
-2. Build all components:
-```bash
-make all
+frontend (default) -> productcatalog (default) [TCP] (FORWARDED)
+frontend (default) -> cart (default) [TCP] (DROPPED)
 ```
-
-Available make targets:
-- `make bpf`: Build eBPF programs
-- `make agent`: Build agent binary
-- `make image`: Build Docker images
-- `make helm-chart`: Package Helm chart
-- `make test`: Run tests
-- `make clean`: Clean build artifacts
-
-3. For development builds on macOS/Windows:
-```bash
-./scripts/bootstrap.sh
-```
-This will:
-- Create a Multipass VM for building
-- Install required dependencies
-- Build all components
-- Copy artifacts back to host
 
 ## Architecture
 
-Depmap consists of three main components:
+The system consists of three main components:
 
-1. **eBPF Program**
-   - Hooks into pod interfaces
-   - Captures L3/L4 flow information
-   - Emits events to userspace
+1. **Agent**:
+   - Loads and attaches eBPF program to network interfaces
+   - Reads flow events from eBPF maps
+   - Enriches flows with Kubernetes metadata
+   - Forwards flows to the gRPC server
 
-2. **Agent (DaemonSet)**
-   - Runs on every node
-   - Loads eBPF programs
-   - Collects flow data
-   - Forwards to relay
+2. **Server**:
+   - Receives flows from the agent
+   - Implements flow filtering
+   - Streams flows to connected clients
 
-3. **Relay (Deployment)**
-   - Aggregates flow data
-   - Provides gRPC API
-   - Serves `depmap observe` requests
+3. **Client**:
+   - Connects to the server via gRPC
+   - Applies filters (namespace, verdict)
+   - Formats and displays flows

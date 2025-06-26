@@ -1,17 +1,16 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "depmap.fullname" . }}-relay
+  name: hubble-grpc-server
+  namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "depmap.labels" . | nindent 4 }}
-    app.kubernetes.io/component: relay
+    app: hubble-grpc-server
+    {{- include "hubble-mapper.labels" . | nindent 4 }}
 spec:
-  type: {{ .Values.relay.service.type }}
-  ports:
-    - port: {{ .Values.relay.service.port }}
-      targetPort: grpc
-      protocol: TCP
-      name: grpc
   selector:
-    {{- include "depmap.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: relay 
+    app: hubble-grpc-server
+  ports:
+  - port: {{ .Values.grpcServer.port }}
+    targetPort: {{ .Values.grpcServer.port }}
+    protocol: TCP
+    name: grpc 

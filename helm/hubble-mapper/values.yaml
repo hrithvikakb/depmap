@@ -14,17 +14,13 @@ grpcServer:
   replicas: 1
 
 agent:
-  image:
-    repository: ghcr.io/depmap/depmap-agent
-    tag: latest
-    pullPolicy: IfNotPresent
   resources:
     limits:
-      cpu: 200m
-      memory: 256Mi
+      cpu: "1"
+      memory: "512Mi"
     requests:
-      cpu: 100m
-      memory: 128Mi
+      cpu: "200m"
+      memory: "256Mi"
 
 server:
   resources:
@@ -33,36 +29,4 @@ server:
       memory: "256Mi"
     requests:
       cpu: "100m"
-      memory: "128Mi"
-
-relay:
-  image:
-    repository: ghcr.io/depmap/depmap-relay
-    tag: latest
-    pullPolicy: IfNotPresent
-  resources:
-    limits:
-      cpu: 200m
-      memory: 256Mi
-    requests:
-      cpu: 100m
-      memory: 128Mi
-  service:
-    type: ClusterIP
-    port: 4245
-
-depmap:
-  bpf:
-    mountPath: /sys/fs/bpf
-    configMap:
-      name: depmap-bpf-objects
-
-serviceAccount:
-  create: true
-  name: depmap
-
-rbac:
-  create: true
-
-tolerations: []
-nodeSelector: {} 
+      memory: "128Mi" 
