@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	serverAddr = flag.String("server", "localhost:4245", "The server address in the format of host:port")
+	serverAddr = flag.String("server", "127.0.0.1:4245", "The server address in the format of host:port")
 	namespace  = flag.String("namespace", "", "Filter flows by namespace")
 	verdict    = flag.String("verdict", "", "Filter flows by verdict (FORWARDED or DROPPED)")
 	format     = flag.String("format", "json", "Output format (json or text)")
