@@ -60,6 +60,8 @@ spec:
           value: "4245"
         - name: BPF_OBJECT_PATH
           value: "/opt/depmap/bpf/flow_observer.o"
+        - name: MONITOR_INTERFACE
+          value: "cni0"
         ports:
         - name: grpc
           containerPort: 4245

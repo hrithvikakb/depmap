@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
@@ -94,7 +95,7 @@ func main() {
 	}
 
 	// Create flow channel for gRPC server
-	flowChan := make(chan *pb.Flow, 1000)
+	flowChan := make(chan *pb.Flow, 10000)
 	defer close(flowChan)
 
 	// Start gRPC server
@@ -135,10 +136,30 @@ func main() {
 	defer objs.FlowEvents.Close()
 	defer objs.FlowObserver.Close()
 
-	// Attach eBPF program to all veth interfaces
-	if err := attachTCProgram(objs.FlowObserver, "veth"); err != nil {
+	// Get interface to monitor from environment variable
+	monitorInterface := os.Getenv("MONITOR_INTERFACE")
+	if monitorInterface == "" {
+		monitorInterface = "cni0" // Default to cni0
+	}
+
+	log.Printf("Attaching eBPF program to interface: %s", monitorInterface)
+
+	// Check if interface exists
+	link, err := netlink.LinkByName(monitorInterface)
+	if err != nil {
+		log.Printf("Available interfaces:")
+		links, _ := netlink.LinkList()
+		for _, l := range links {
+			log.Printf("  - %s (type: %s)", l.Attrs().Name, l.Type())
+		}
+		log.Fatalf("Failed to find interface %s: %v", monitorInterface, err)
+	}
+
+	// Attach eBPF program to the specified interface
+	if err := attachTCProgram(objs.FlowObserver, link); err != nil {
 		log.Fatalf("Failed to attach TC program: %v", err)
 	}
+	log.Printf("Successfully attached eBPF program to interface %s", monitorInterface)
 
 	// Create perf reader with larger buffer
 	bufferSize := os.Getpagesize() * 16 // Use 16 pages for buffer
@@ -150,129 +171,153 @@ func main() {
 
 	// Start reading events
 	log.Printf("Starting flow observer with perf buffer size: %d bytes", bufferSize)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
 
-		record, err := rd.Read()
-		if err != nil {
-			if err == perf.ErrClosed {
+	// Create error channel for monitoring read errors
+	errChan := make(chan error, 1)
+
+	// Start event processing in a goroutine
+	go func() {
+		consecutiveErrors := 0
+		maxConsecutiveErrors := 5
+		backoffDuration := time.Second
+
+		for {
+			select {
+			case <-ctx.Done():
 				return
+			default:
 			}
-			log.Printf("Error reading perf event: %v", err)
-			continue
-		}
 
-		// Parse flow data
-		var flow struct {
-			SrcIP     uint32
-			DstIP     uint32
-			SrcPort   uint16
-			DstPort   uint16
-			Protocol  uint8
-			Verdict   uint8
-			_         uint16 // padding to align Timestamp
-			Timestamp uint64
-		}
+			record, err := rd.Read()
+			if err != nil {
+				if err == perf.ErrClosed {
+					errChan <- fmt.Errorf("perf reader closed unexpectedly")
+					return
+				}
 
-		log.Printf("DEBUG: Perf event details: raw_size=%d, lost_samples=%d, expected_struct_size=%d",
-			len(record.RawSample), record.LostSamples, binary.Size(flow))
+				consecutiveErrors++
+				log.Printf("Error reading perf event (%d/%d): %v", consecutiveErrors, maxConsecutiveErrors, err)
 
-		if len(record.RawSample) == 0 {
-			log.Printf("ERROR: Empty perf event received, skipping")
-			continue
-		}
+				if consecutiveErrors >= maxConsecutiveErrors {
+					errChan <- fmt.Errorf("too many consecutive read errors: %v", err)
+					return
+				}
 
-		if len(record.RawSample) != binary.Size(flow) {
-			log.Printf("WARNING: Unexpected raw sample size: got=%d, want=%d",
-				len(record.RawSample), binary.Size(flow))
-			log.Printf("DEBUG: Raw bytes (hex): % x", record.RawSample)
-			continue
-		}
-
-		if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &flow); err != nil {
-			log.Printf("Failed to parse flow data: raw_size=%d, expected_size=%d, error=%v",
-				len(record.RawSample), binary.Size(flow), err)
-			// Dump raw bytes for debugging
-			log.Printf("Raw bytes: %v", record.RawSample)
-			continue
-		}
-
-		// Convert IPs to string format
-		srcIP := net.IP(make([]byte, 4))
-		dstIP := net.IP(make([]byte, 4))
-		binary.BigEndian.PutUint32(srcIP, flow.SrcIP)
-		binary.BigEndian.PutUint32(dstIP, flow.DstIP)
-
-		log.Printf("Parsed flow: src=%s:%d dst=%s:%d proto=%d verdict=%d timestamp=%d",
-			srcIP.String(), flow.SrcPort, dstIP.String(), flow.DstPort, flow.Protocol, flow.Verdict, flow.Timestamp)
-
-		// Get pod info
-		srcPod := podWatcher.GetPodInfo(srcIP.String())
-		dstPod := podWatcher.GetPodInfo(dstIP.String())
-
-		// Create flow event
-		event := &pb.Flow{
-			SourceIp:        srcIP.String(),
-			DestinationIp:   dstIP.String(),
-			SourcePort:      uint32(flow.SrcPort),
-			DestinationPort: uint32(flow.DstPort),
-			L4Protocol:      getProtocolName(flow.Protocol),
-			Time:            int64(flow.Timestamp),
-			Verdict:         getVerdictString(flow.Verdict),
-		}
-
-		// Add pod metadata if available
-		if srcPod != nil {
-			event.SourcePod = srcPod.Name
-			event.SourceNamespace = srcPod.Namespace
-		}
-		if dstPod != nil {
-			event.DestinationPod = dstPod.Name
-			event.DestinationNamespace = dstPod.Namespace
-		}
-
-		// Send flow to channel
-		select {
-		case flowChan <- event:
-		default:
-			log.Printf("Flow channel full, dropping event")
-		}
-	}
-}
-
-func attachTCProgram(prog *ebpf.Program, ifacePrefix string) error {
-	links, err := netlink.LinkList()
-	if err != nil {
-		return fmt.Errorf("failed to list network interfaces: %w", err)
-	}
-
-	for _, link := range links {
-		if _, ok := link.(*netlink.Veth); ok {
-			if err := attachQdisc(link); err != nil {
-				log.Printf("Failed to attach qdisc to %s: %v. Continuing...", link.Attrs().Name, err)
+				// Apply backoff
+				time.Sleep(backoffDuration)
+				backoffDuration *= 2 // Exponential backoff
+				if backoffDuration > 30*time.Second {
+					backoffDuration = 30 * time.Second
+				}
 				continue
 			}
 
-			if err := attachFilter(prog, link, netlink.HANDLE_MIN_EGRESS, "egress"); err != nil {
-				log.Printf("Failed to attach egress filter to %s: %v", link.Attrs().Name, err)
-			} else {
-				log.Printf("Attached egress TC program to %s", link.Attrs().Name)
+			// Reset error counters on successful read
+			consecutiveErrors = 0
+			backoffDuration = time.Second
+
+			// flow struct must be defined before use in logging
+			var flow struct {
+				Timestamp uint64
+				SrcIP     uint32
+				DstIP     uint32
+				SrcPort   uint16
+				DstPort   uint16
+				Protocol  uint8
+				Verdict   uint8
 			}
 
-			if err := attachFilter(prog, link, netlink.HANDLE_MIN_INGRESS, "ingress"); err != nil {
-				log.Printf("Failed to attach ingress filter to %s: %v", link.Attrs().Name, err)
+			// Add detailed logging for raw data
+			if len(record.RawSample) < binary.Size(flow) {
+				log.Printf("ERROR: Truncated perf event received: got %d bytes, want %d bytes. Raw data (hex): %x",
+					len(record.RawSample), binary.Size(flow), record.RawSample)
+				continue
+			}
+
+			// Parse flow data
+			if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &flow); err != nil {
+				log.Printf("Failed to parse flow data: %v", err)
+				continue
+			}
+
+			// Convert IPs to string format
+			srcIP := net.IP(make([]byte, 4))
+			dstIP := net.IP(make([]byte, 4))
+			binary.LittleEndian.PutUint32(srcIP, flow.SrcIP)
+			binary.LittleEndian.PutUint32(dstIP, flow.DstIP)
+
+			// Get pod information for source and destination IPs
+			srcPod := podWatcher.GetPodInfo(srcIP.String())
+			dstPod := podWatcher.GetPodInfo(dstIP.String())
+
+			// Create flow event with basic network information
+			flowEvent := &pb.Flow{
+				Time:            int64(flow.Timestamp),
+				SourceIp:        srcIP.String(),
+				DestinationIp:   dstIP.String(),
+				SourcePort:      uint32(flow.SrcPort),
+				DestinationPort: uint32(flow.DstPort),
+				L4Protocol:      getProtocolName(flow.Protocol),
+				Verdict:         getVerdictString(flow.Verdict),
+			}
+
+			// Add pod information if available
+			if srcPod != nil {
+				flowEvent.SourcePod = srcPod.Name
+				flowEvent.SourceNamespace = srcPod.Namespace
+				log.Printf("Source pod found: %s/%s", srcPod.Namespace, srcPod.Name)
 			} else {
-				log.Printf("Attached ingress TC program to %s", link.Attrs().Name)
+				log.Printf("No pod found for source IP: %s", srcIP.String())
+			}
+
+			if dstPod != nil {
+				flowEvent.DestinationPod = dstPod.Name
+				flowEvent.DestinationNamespace = dstPod.Namespace
+				log.Printf("Destination pod found: %s/%s", dstPod.Namespace, dstPod.Name)
+			} else {
+				log.Printf("No pod found for destination IP: %s", dstIP.String())
+			}
+
+			// Send flow event with timeout
+			select {
+			case flowChan <- flowEvent:
+				// Successfully sent
+			case <-time.After(time.Second):
+				log.Printf("Warning: Flow channel is full, dropping event")
 			}
 		}
+	}()
+
+	// Monitor for errors
+	select {
+	case err := <-errChan:
+		log.Fatalf("Fatal error in event processing: %v", err)
+	case <-ctx.Done():
+		log.Println("Shutting down flow observer")
 	}
+}
+
+// attachTCProgram attaches the eBPF program to the specified network interface
+func attachTCProgram(prog *ebpf.Program, link netlink.Link) error {
+	// Attach qdisc first
+	if err := attachQdisc(link); err != nil {
+		return fmt.Errorf("failed to attach qdisc: %v", err)
+	}
+
+	// Attach filter for ingress
+	if err := attachFilter(prog, link, netlink.HANDLE_MIN_INGRESS, "ingress"); err != nil {
+		return fmt.Errorf("failed to attach ingress filter: %v", err)
+	}
+
+	// Attach filter for egress
+	if err := attachFilter(prog, link, netlink.HANDLE_MIN_EGRESS, "egress"); err != nil {
+		return fmt.Errorf("failed to attach egress filter: %v", err)
+	}
+
 	return nil
 }
 
+// attachQdisc attaches the necessary qdisc to the interface
 func attachQdisc(link netlink.Link) error {
 	qdisc := &netlink.GenericQdisc{
 		QdiscAttrs: netlink.QdiscAttrs{
@@ -283,12 +328,17 @@ func attachQdisc(link netlink.Link) error {
 		QdiscType: "clsact",
 	}
 
+	// Try to delete existing qdisc first (ignore errors)
+	_ = netlink.QdiscDel(qdisc)
+
+	// Replace qdisc
 	if err := netlink.QdiscReplace(qdisc); err != nil {
 		return fmt.Errorf("could not replace qdisc: %w", err)
 	}
 	return nil
 }
 
+// attachFilter attaches a TC filter with the eBPF program
 func attachFilter(prog *ebpf.Program, link netlink.Link, parent uint32, direction string) error {
 	filter := &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
@@ -296,14 +346,19 @@ func attachFilter(prog *ebpf.Program, link netlink.Link, parent uint32, directio
 			Parent:    parent,
 			Handle:    1,
 			Protocol:  unix.ETH_P_ALL,
+			Priority:  1,
 		},
 		Fd:           prog.FD(),
 		Name:         fmt.Sprintf("flow-observer-%s", direction),
 		DirectAction: true,
 	}
 
+	// Try to delete existing filter first (ignore errors)
+	_ = netlink.FilterDel(filter)
+
+	// Replace filter
 	if err := netlink.FilterReplace(filter); err != nil {
-		return fmt.Errorf("could not replace filter: %w", err)
+		return fmt.Errorf("could not replace filter for %s: %w", direction, err)
 	}
 	return nil
 }

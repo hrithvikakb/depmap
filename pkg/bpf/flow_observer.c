@@ -9,16 +9,21 @@
 #include <linux/in.h>
 #include <linux/pkt_cls.h>  // For TC_ACT_* definitions
 
+// VXLAN header structure
+struct vxlan_header {
+    __u32 vx_flags;
+    __u32 vx_vni;
+};
+
 // Flow event structure for perf buffer
 struct flow_event {
+    __u64 timestamp;
     __u32 src_ip;
     __u32 dst_ip;
     __u16 src_port;
     __u16 dst_port;
     __u8 protocol;
     __u8 verdict;
-    __u16 _pad;  // padding to align timestamp
-    __u64 timestamp;
 } __attribute__((packed));
 
 // BPF map to store flow information
@@ -30,80 +35,105 @@ struct {
 } flow_events SEC(".maps");
 
 // Helper function to extract ports
-static __always_inline void extract_ports(void *transport_header, void *data_end, __u8 protocol,
-                                        struct flow_event *flow) {
+static __always_inline void extract_ports(struct __sk_buff *skb, __u8 protocol, __u16 *src_port, __u16 *dst_port, __u32 ip_payload_offset) {
     switch (protocol) {
         case IPPROTO_TCP: {
-            struct tcphdr *tcp = transport_header;
-            if ((void*)(tcp + 1) > data_end)
+            struct tcphdr tcp;
+            if (bpf_skb_load_bytes(skb, ip_payload_offset, &tcp, sizeof(tcp)) < 0)
                 return;
-            flow->src_port = bpf_ntohs(tcp->source);
-            flow->dst_port = bpf_ntohs(tcp->dest);
+            *src_port = bpf_ntohs(tcp.source);
+            *dst_port = bpf_ntohs(tcp.dest);
             break;
         }
         case IPPROTO_UDP: {
-            struct udphdr *udp = transport_header;
-            if ((void*)(udp + 1) > data_end)
+            struct udphdr udp;
+            if (bpf_skb_load_bytes(skb, ip_payload_offset, &udp, sizeof(udp)) < 0)
                 return;
-            flow->src_port = bpf_ntohs(udp->source);
-            flow->dst_port = bpf_ntohs(udp->dest);
+            *src_port = bpf_ntohs(udp.source);
+            *dst_port = bpf_ntohs(udp.dest);
             break;
         }
         default:
-            flow->src_port = 0;
-            flow->dst_port = 0;
+            *src_port = 0;
+            *dst_port = 0;
     }
 }
 
-SEC("tc")
+// Helper function to process IP packet
+static __always_inline void process_ip_packet(struct __sk_buff *skb, __u32 ip_offset) {
+    struct iphdr iph;
+    if (bpf_skb_load_bytes(skb, ip_offset, &iph, sizeof(iph)) < 0)
+        return;
+
+    // Check if this is VXLAN traffic (UDP port 4789)
+    if (iph.protocol == IPPROTO_UDP) {
+        struct udphdr udp;
+        if (bpf_skb_load_bytes(skb, ip_offset + sizeof(iph), &udp, sizeof(udp)) < 0)
+            return;
+
+        // If this is VXLAN traffic
+        if (bpf_ntohs(udp.dest) == 4789) {
+            // Skip VXLAN header to get to inner Ethernet frame
+            __u32 inner_eth_offset = ip_offset + sizeof(iph) + sizeof(udp) + sizeof(struct vxlan_header);
+            struct ethhdr inner_eth;
+            if (bpf_skb_load_bytes(skb, inner_eth_offset, &inner_eth, sizeof(inner_eth)) < 0)
+                return;
+
+            // Process inner IP packet if it's IPv4
+            if (bpf_ntohs(inner_eth.h_proto) == ETH_P_IP) {
+                struct iphdr inner_ip;
+                __u32 inner_ip_offset = inner_eth_offset + sizeof(inner_eth);
+                if (bpf_skb_load_bytes(skb, inner_ip_offset, &inner_ip, sizeof(inner_ip)) < 0)
+                    return;
+
+                // Extract ports from inner packet
+                __u16 src_port = 0, dst_port = 0;
+                extract_ports(skb, inner_ip.protocol, &src_port, &dst_port, inner_ip_offset + sizeof(inner_ip));
+
+                // Create flow event with inner packet information
+                struct flow_event event = {
+                    .timestamp = bpf_ktime_get_ns(),
+                    .src_ip = inner_ip.saddr,
+                    .dst_ip = inner_ip.daddr,
+                    .src_port = src_port,
+                    .dst_port = dst_port,
+                    .protocol = inner_ip.protocol,
+                    .verdict = TC_ACT_OK
+                };
+
+                bpf_perf_event_output(skb, &flow_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+            }
+            return;
+        }
+    }
+
+    // For non-VXLAN traffic, process normally
+    __u16 src_port = 0, dst_port = 0;
+    extract_ports(skb, iph.protocol, &src_port, &dst_port, ip_offset + sizeof(iph));
+
+    struct flow_event event = {
+        .timestamp = bpf_ktime_get_ns(),
+        .src_ip = iph.saddr,
+        .dst_ip = iph.daddr,
+        .src_port = src_port,
+        .dst_port = dst_port,
+        .protocol = iph.protocol,
+        .verdict = TC_ACT_OK
+    };
+
+    bpf_perf_event_output(skb, &flow_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+}
+
+SEC("classifier")
 int flow_observer(struct __sk_buff *skb) {
-    // Initialize flow event
-    struct flow_event flow = {};
-    
-    // Get IP header
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-    
-    struct ethhdr *eth = data;
-    if ((void*)(eth + 1) > data_end)
-        return TC_ACT_OK;
-        
-    if (eth->h_proto != bpf_htons(ETH_P_IP))
-        return TC_ACT_OK;
-        
-    struct iphdr *ip = (void*)(eth + 1);
-    if ((void*)(ip + 1) > data_end)
+    // Load ethernet header
+    struct ethhdr eth;
+    if (bpf_skb_load_bytes(skb, 0, &eth, sizeof(eth)) < 0)
         return TC_ACT_OK;
 
-    // Store IP info
-    flow.src_ip = ip->saddr;
-    flow.dst_ip = ip->daddr;
-    flow.protocol = ip->protocol;
-
-    // Get transport header
-    void *transport_header = (void*)(ip + 1);
-    extract_ports(transport_header, data_end, ip->protocol, &flow);
-
-    // Set metadata
-    flow.verdict = TC_ACT_OK;  // Default to FORWARD
-    flow._pad = 0;  // Clear padding
-    flow.timestamp = bpf_ktime_get_ns();
-
-    // Validate flow data before submission
-    if (flow.src_ip == 0 || flow.dst_ip == 0) {
-        return TC_ACT_OK;  // Skip invalid flows
-    }
-
-    // Ensure protocol is valid
-    if (flow.protocol != IPPROTO_TCP && flow.protocol != IPPROTO_UDP) {
-        return TC_ACT_OK;  // Skip non-TCP/UDP for now
-    }
-
-    // Send event to userspace
-    int ret = bpf_perf_event_output(skb, &flow_events, BPF_F_CURRENT_CPU,
-                                   &flow, sizeof(flow));
-    if (ret < 0) {
-        // Just log the error by incrementing a counter in a future version
+    // Only process IPv4 packets
+    if (bpf_ntohs(eth.h_proto) == ETH_P_IP) {
+        process_ip_packet(skb, sizeof(eth));
     }
 
     return TC_ACT_OK;
